@@ -63,12 +63,14 @@ def get_table_schema(conn, table):
             """, (table,))
             columns = cur.fetchall()
             
-            cur.execute(f"""
-                SELECT c.column_name
+            cur.execute("""
+                SELECT kcu.column_name
                 FROM information_schema.table_constraints tc
-                JOIN information_schema.constraint_column_usage ccu
-                USING (constraint_schema, constraint_name)
-                WHERE constraint_type = 'PRIMARY KEY'
+                JOIN information_schema.key_column_usage kcu
+                ON tc.constraint_name = kcu.constraint_name
+                AND tc.table_schema = kcu.table_schema
+                WHERE tc.constraint_type = 'PRIMARY KEY'
+                AND tc.table_schema = 'public'
                 AND lower(tc.table_name) = lower(%s)
             """, (table,))
             primary_keys = [pk[0] for pk in cur.fetchall()]
@@ -127,18 +129,23 @@ def transfer_database(source_url, target_url):
     try:
         tables = get_all_tables(source_conn)
         for table in tables:
-            create_stmt = get_table_schema(source_conn, table)
-            if not create_stmt:
-                continue
-            with target_conn.cursor() as cur:
-                cur.execute(f'DROP TABLE IF EXISTS "{table}" CASCADE')
-                cur.execute(create_stmt)
-                target_conn.commit()
-            copy_table_data(source_conn, target_conn, table)
-        logging.info("Database transfer completed successfully")
+            try:
+                create_stmt = get_table_schema(source_conn, table)
+                if not create_stmt:
+                    logging.warning(f"Skipping table {table}: schema not found")
+                    continue
+                with target_conn.cursor() as cur:
+                    cur.execute(f'DROP TABLE IF EXISTS "{table}" CASCADE')
+                    cur.execute(create_stmt)
+                    target_conn.commit()
+                copy_table_data(source_conn, target_conn, table)
+            except Exception as e:
+                logging.error(f"Error processing table {table}: {str(e)}")
+                target_conn.rollback()  # Rollback for the current table
     finally:
         source_conn.close()
         target_conn.close()
+        logging.info("Database transfer completed")
 
 # API Models
 class TransferRequest(BaseModel):
